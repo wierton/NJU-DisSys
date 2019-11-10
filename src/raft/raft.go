@@ -20,10 +20,12 @@ package raft
 import "sync"
 import "labrpc"
 
+import "time"
 // import "bytes"
 // import "encoding/gob"
 
-
+// import "runtime/debug"
+import "fmt"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -31,35 +33,33 @@ import "labrpc"
 // tester) on the same server, via the applyCh passed to Make().
 //
 type ApplyMsg struct {
-	Index       int
-	Command     interface{}
-	UseSnapshot bool   // ignore for lab2; only used in lab3
-	Snapshot    []byte // ignore for lab2; only used in lab3
+  Index       int
+  Command     interface{}
+  UseSnapshot bool   // ignore for lab2; only used in lab3
+  Snapshot    []byte // ignore for lab2; only used in lab3
 }
 
 //
 // A Go object implementing a single Raft peer.
 //
 type Raft struct {
-	mu        sync.Mutex
-	peers     []*labrpc.ClientEnd
-	persister *Persister
-	me        int // index into peers[]
+  mu        sync.Mutex
+  peers     []*labrpc.ClientEnd
+  persister *Persister
+  me        int // index into peers[]
 
-	// Your data here.
-	// Look at the paper's Figure 2 for a description of what
-	// state a Raft server must maintain.
-
+  // Your data here.
+  // Look at the paper's Figure 2 for a description of what
+  // state a Raft server must maintain.
+  term      int
+  isLeader  bool
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
-	// Your code here.
-	return term, isleader
+  // Your code here.
+  return rf.term, rf.isLeader
 }
 
 //
@@ -68,50 +68,88 @@ func (rf *Raft) GetState() (int, bool) {
 // see paper's Figure 2 for a description of what should be persistent.
 //
 func (rf *Raft) persist() {
-	// Your code here.
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := gob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+  // Your code here.
+  // Example:
+  // w := new(bytes.Buffer)
+  // e := gob.NewEncoder(w)
+  // e.Encode(rf.xxx)
+  // e.Encode(rf.yyy)
+  // data := w.Bytes()
+  // rf.persister.SaveRaftState(data)
 }
 
 //
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	// Your code here.
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := gob.NewDecoder(r)
-	// d.Decode(&rf.xxx)
-	// d.Decode(&rf.yyy)
+  // Your code here.
+  // Example:
+  // r := bytes.NewBuffer(data)
+  // d := gob.NewDecoder(r)
+  // d.Decode(&rf.xxx)
+  // d.Decode(&rf.yyy)
 }
-
-
-
 
 //
 // example RequestVote RPC arguments structure.
 //
 type RequestVoteArgs struct {
-	// Your data here.
+  // Your data here.
+  msgid int
+  client_id int
 }
 
 //
 // example RequestVote RPC reply structure.
 //
 type RequestVoteReply struct {
-	// Your data here.
+  // Your data here.
+  ack_id int
 }
 
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here.
+  // Your code here.
+  fmt.Printf("[s:%d] request from %d\n", rf.me, args.client_id)
+  if rf.me < args.client_id {
+    reply.ack_id = rf.me
+  } else {
+    reply.ack_id = args.client_id
+  }
+}
+
+func (rf *Raft) InformLeader(args RequestVoteArgs, reply *RequestVoteReply) {
+  fmt.Printf("[s:%d] InformLeader from %d\n", rf.me, args.client_id)
+}
+
+func (rf *Raft) LeaderElection() {
+  for ;; {
+    req := RequestVoteArgs { client_id: rf.me }
+    reply := &RequestVoteReply{}
+    count := 0
+    fmt.Printf("1nd stage\n")
+    for i := 0; i < len(rf.peers); i ++ {
+      fmt.Printf("1nd stage: from %d, send to peers[%d]\n", rf.me, i)
+      ok := rf.peers[i].Call("Raft.RequestVote", req, reply);
+      if ok && rf.me < reply.ack_id {
+        count ++
+      }
+    }
+    fmt.Printf("2nd stage\n")
+    if count > len(rf.peers) / 2 {
+      rf.isLeader = true
+      for i := 0; i < len(rf.peers); i ++ {
+        rf.peers[i].Call("Raft.InformLeader", req, reply);
+      }
+    } else {
+      // wait 10 ms
+      rf.isLeader = false
+    }
+
+    time.Sleep(50 * time.Millisecond)
+  }
 }
 
 //
@@ -132,8 +170,8 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+  ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+  return ok
 }
 
 
@@ -151,12 +189,9 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-	index := -1
-	term := -1
-	isLeader := true
+  index := -1
 
-
-	return index, term, isLeader
+  return index, rf.term, rf.isLeader
 }
 
 //
@@ -166,8 +201,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 // turn off debug output from this instance.
 //
 func (rf *Raft) Kill() {
-	// Your code here, if desired.
+  // Your code here, if desired.
 }
+
 
 //
 // the service or tester wants to create a Raft server. the ports
@@ -181,17 +217,17 @@ func (rf *Raft) Kill() {
 // for any long-running work.
 //
 func Make(peers []*labrpc.ClientEnd, me int,
-	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
+  persister *Persister, applyCh chan ApplyMsg) *Raft {
+  rf := &Raft{}
+  rf.peers = peers
+  rf.persister = persister
+  rf.me = me
 
-	// Your initialization code here.
+  // Your initialization code here.
+  go rf.LeaderElection()
 
-	// initialize from state persisted before a crash
-	rf.readPersist(persister.ReadRaftState())
+  // initialize from state persisted before a crash
+  rf.readPersist(persister.ReadRaftState())
 
-
-	return rf
+  return rf
 }
