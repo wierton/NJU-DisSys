@@ -20,6 +20,7 @@ package raft
 import "sync"
 import "labrpc"
 
+import "math/rand"
 import "time"
 // import "bytes"
 // import "encoding/gob"
@@ -52,14 +53,56 @@ type Raft struct {
   // Look at the paper's Figure 2 for a description of what
   // state a Raft server must maintain.
   term      int
-  isLeader  bool
+  LeaderId  int
+  ElectionTimeout time.Time // miniseconds
+}
+
+const (
+  RaftModeFollower = 0
+  RaftModeCandidate = 1
+  RaftModeLeader = 2
+)
+
+func (rf *Raft) log(format string, args ...interface{}) {
+  s := fmt.Sprintf("[S:%d,T:%d] ", rf.me, rf.term)
+  s += fmt.Sprintf(format, args...)
+  // fmt.Printf("%s", s)
+}
+
+func (rf *Raft) rand(st, ed int) int {
+  r := rand.New(rand.NewSource(time.Now().UnixNano()))
+  if st >= ed { st, ed = ed, st }
+  return r.Intn(ed - st) + st;
+}
+
+func (rf *Raft) isLeader() bool {
+  return rf.me == rf.LeaderId
+}
+
+func (rf *Raft) incTerm() {
+  rf.term ++
+  rf.LeaderId = -1
+}
+
+func (rf *Raft) hasVoteInThisTerm() bool {
+  return rf.LeaderId != -1
+}
+
+func (rf *Raft) ResetTimeout() {
+  amount := time.Duration(rf.rand(150, 300))
+  interval := amount * time.Millisecond
+  rf.log("timeout %v\n", interval)
+  rf.ElectionTimeout = time.Now().Add(interval)
 }
 
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
   // Your code here.
-  return rf.term, rf.isLeader
+  if rf.isLeader() {
+    rf.log("isLeader\n")
+  }
+  return rf.term, rf.isLeader()
 }
 
 //
@@ -95,8 +138,8 @@ func (rf *Raft) readPersist(data []byte) {
 //
 type RequestVoteArgs struct {
   // Your data here.
-  msgid int
-  client_id int
+  Term     int
+  ClientId int
 }
 
 //
@@ -104,7 +147,7 @@ type RequestVoteArgs struct {
 //
 type RequestVoteReply struct {
   // Your data here.
-  ack_id int
+  VoteYou  bool
 }
 
 //
@@ -112,43 +155,75 @@ type RequestVoteReply struct {
 //
 func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
   // Your code here.
-  fmt.Printf("[s:%d] request from %d\n", rf.me, args.client_id)
-  if rf.me < args.client_id {
-    reply.ack_id = rf.me
-  } else {
-    reply.ack_id = args.client_id
-  }
+  rf.mu.Lock()
+  defer rf.mu.Unlock()
+
+  if rf.hasVoteInThisTerm() { rf.term = args.Term }
+  reply.VoteYou = !rf.hasVoteInThisTerm()
+  rf.LeaderId = args.ClientId
+  rf.ResetTimeout()
+  rf.log("from %d, vote %v\n", args.ClientId, reply.VoteYou)
 }
 
-func (rf *Raft) InformLeader(args RequestVoteArgs, reply *RequestVoteReply) {
-  fmt.Printf("[s:%d] InformLeader from %d\n", rf.me, args.client_id)
+
+type AppendEntriesArgs RequestVoteArgs
+type AppendEntriesReply struct {
+  Ok bool
+}
+
+func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
+  rf.ResetTimeout()
+  rf.term = args.Term
+  rf.LeaderId = args.ClientId
+  reply.Ok = true
+  rf.log("from %d, heart beat\n", args.ClientId)
+}
+
+func (rf *Raft) WaitElectionTimeout() {
+  for ; time.Now().Before(rf.ElectionTimeout); {
+    time.Sleep(1 * time.Millisecond)
+  }
 }
 
 func (rf *Raft) LeaderElection() {
   for ;; {
-    req := RequestVoteArgs { client_id: rf.me }
+    rf.LeaderId = -1
+    rf.ResetTimeout()
+    rf.WaitElectionTimeout();
+
+    // as candidate
+    rf.log("candidate mode\n")
+    rf.term ++;
+    req := RequestVoteArgs { Term: rf.term, ClientId: rf.me }
     reply := &RequestVoteReply{}
+    total := 0
     count := 0
-    fmt.Printf("1nd stage\n")
     for i := 0; i < len(rf.peers); i ++ {
-      fmt.Printf("1nd stage: from %d, send to peers[%d]\n", rf.me, i)
+      if i == rf.me { continue }
       ok := rf.peers[i].Call("Raft.RequestVote", req, reply);
-      if ok && rf.me < reply.ack_id {
-        count ++
+      if ok {
+        total ++
+        if reply.VoteYou { count ++ }
       }
-    }
-    fmt.Printf("2nd stage\n")
-    if count > len(rf.peers) / 2 {
-      rf.isLeader = true
-      for i := 0; i < len(rf.peers); i ++ {
-        rf.peers[i].Call("Raft.InformLeader", req, reply);
-      }
-    } else {
-      // wait 10 ms
-      rf.isLeader = false
     }
 
-    time.Sleep(50 * time.Millisecond)
+    // as leader
+    if count > total / 2 {
+      rf.log("leader mode\n")
+      rf.LeaderId = rf.me
+      for ;; {
+        for i := 0; i < len(rf.peers); i ++ {
+          if i == rf.me { continue }
+            req := AppendEntriesArgs { Term: rf.term, ClientId: rf.me }
+            reply := &AppendEntriesReply{}
+            rf.peers[i].Call("Raft.AppendEntries", req, reply);
+            time.Sleep(10 * time.Millisecond)
+        }
+      }
+    }
+
+    // as follower
+    rf.log("follower mode\n")
   }
 }
 
@@ -169,10 +244,12 @@ func (rf *Raft) LeaderElection() {
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
 //
+/*
 func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *RequestVoteReply) bool {
   ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
   return ok
 }
+*/
 
 
 //
@@ -191,7 +268,7 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
   index := -1
 
-  return index, rf.term, rf.isLeader
+  return index, rf.term, rf.isLeader()
 }
 
 //
