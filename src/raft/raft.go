@@ -52,7 +52,8 @@ type Raft struct {
   // Your data here.
   // Look at the paper's Figure 2 for a description of what
   // state a Raft server must maintain.
-  term      int
+  Killed    bool
+  Term      int
   LeaderId  int
   ElectionTimeout time.Time // miniseconds
 }
@@ -64,9 +65,10 @@ const (
 )
 
 func (rf *Raft) log(format string, args ...interface{}) {
-  s := fmt.Sprintf("[S:%d,T:%d] ", rf.me, rf.term)
+  nowStr := time.Now().Format("15:04:05.000")
+  s := fmt.Sprintf("%s [S:%d,T:%d] ", nowStr, rf.me, rf.Term)
   s += fmt.Sprintf(format, args...)
-  // fmt.Printf("%s", s)
+  fmt.Printf("%s", s)
 }
 
 func (rf *Raft) rand(st, ed int) int {
@@ -80,7 +82,10 @@ func (rf *Raft) isLeader() bool {
 }
 
 func (rf *Raft) incTerm() {
-  rf.term ++
+  rf.mu.Lock()
+  defer rf.mu.Unlock()
+
+  rf.Term ++
   rf.LeaderId = -1
 }
 
@@ -88,11 +93,11 @@ func (rf *Raft) hasVoteInThisTerm() bool {
   return rf.LeaderId != -1
 }
 
-func (rf *Raft) ResetTimeout() {
+func (rf *Raft) ResetTimeout() time.Duration {
   amount := time.Duration(rf.rand(150, 300))
   interval := amount * time.Millisecond
-  rf.log("timeout %v\n", interval)
   rf.ElectionTimeout = time.Now().Add(interval)
+  return interval
 }
 
 // return currentTerm and whether this server
@@ -102,7 +107,7 @@ func (rf *Raft) GetState() (int, bool) {
   if rf.isLeader() {
     rf.log("isLeader\n")
   }
-  return rf.term, rf.isLeader()
+  return rf.Term, rf.isLeader()
 }
 
 //
@@ -158,11 +163,15 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
   rf.mu.Lock()
   defer rf.mu.Unlock()
 
-  if rf.hasVoteInThisTerm() { rf.term = args.Term }
+  if rf.Term > args.Term { return }
+  if rf.Term < args.Term { rf.LeaderId = -1 }
+
   reply.VoteYou = !rf.hasVoteInThisTerm()
   rf.LeaderId = args.ClientId
-  rf.ResetTimeout()
-  rf.log("from %d, vote %v\n", args.ClientId, reply.VoteYou)
+  timeout := rf.ResetTimeout()
+  rf.log("from %d, vote %v, n-timeout %v, n-term: %d\n", args.ClientId, reply.VoteYou,
+    timeout, args.Term)
+  rf.Term = args.Term
 }
 
 
@@ -172,34 +181,50 @@ type AppendEntriesReply struct {
 }
 
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
-  rf.ResetTimeout()
-  rf.term = args.Term
+  rf.mu.Lock()
+  defer rf.mu.Unlock()
+
+  timeout := rf.ResetTimeout()
+  rf.log("from %d, heart beat, n-timeout %v, n-term %d\n", args.ClientId, timeout,
+    args.Term)
+  rf.Term = args.Term
   rf.LeaderId = args.ClientId
   reply.Ok = true
-  rf.log("from %d, heart beat\n", args.ClientId)
 }
 
 func (rf *Raft) WaitElectionTimeout() {
   for ; time.Now().Before(rf.ElectionTimeout); {
+    if rf.Killed { return }
     time.Sleep(1 * time.Millisecond)
   }
 }
 
 func (rf *Raft) LeaderElection() {
   for ;; {
+    rf.mu.Lock()
     rf.LeaderId = -1
+    rf.mu.Unlock()
+
     rf.ResetTimeout()
     rf.WaitElectionTimeout();
+    if rf.Killed {
+      rf.log("Killed detected, exit goroutine\n")
+      return
+    }
 
     // as candidate
-    rf.log("candidate mode\n")
-    rf.term ++;
-    req := RequestVoteArgs { Term: rf.term, ClientId: rf.me }
+    rf.log("candidate mode, update term to %d\n", rf.Term + 1)
+    rf.incTerm()
+    req := RequestVoteArgs { Term: rf.Term, ClientId: rf.me }
     reply := &RequestVoteReply{}
     total := 0
     count := 0
     for i := 0; i < len(rf.peers); i ++ {
       if i == rf.me { continue }
+      if rf.Killed {
+        rf.log("Killed detected, exit goroutine\n")
+        return
+      }
       ok := rf.peers[i].Call("Raft.RequestVote", req, reply);
       if ok {
         total ++
@@ -209,16 +234,23 @@ func (rf *Raft) LeaderElection() {
 
     // as leader
     if count > total / 2 {
-      rf.log("leader mode\n")
+      rf.log("leader mode %d/%d\n", count, total)
+      rf.mu.Lock()
       rf.LeaderId = rf.me
+      rf.mu.Unlock()
+
       for ;; {
         for i := 0; i < len(rf.peers); i ++ {
           if i == rf.me { continue }
-            req := AppendEntriesArgs { Term: rf.term, ClientId: rf.me }
-            reply := &AppendEntriesReply{}
-            rf.peers[i].Call("Raft.AppendEntries", req, reply);
-            time.Sleep(10 * time.Millisecond)
+          if rf.Killed {
+            rf.log("Killed detected, exit goroutine\n")
+            return
+          }
+          req := AppendEntriesArgs { Term: rf.Term, ClientId: rf.me }
+          reply := &AppendEntriesReply{}
+          rf.peers[i].Call("Raft.AppendEntries", req, reply);
         }
+        time.Sleep(10 * time.Millisecond)
       }
     }
 
@@ -268,7 +300,7 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
   index := -1
 
-  return index, rf.term, rf.isLeader()
+  return index, rf.Term, rf.isLeader()
 }
 
 //
@@ -279,6 +311,8 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
   // Your code here, if desired.
+  rf.Killed = true
+  rf.log("I'm Killed\n")
 }
 
 
@@ -301,6 +335,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.me = me
 
   // Your initialization code here.
+  rf.Killed = false
   go rf.LeaderElection()
 
   // initialize from state persisted before a crash

@@ -258,6 +258,7 @@ func (cfg *config) setlongreordering(longrel bool) {
 // check that there's exactly one leader.
 // try a few times in case re-elections are needed.
 func (cfg *config) checkOneLeader() int {
+  fmt.Printf("------\n")
   for iters := 0; iters < 10; iters++ {
     time.Sleep(500 * time.Millisecond)
     leaders := make(map[int][]int)
@@ -266,13 +267,11 @@ func (cfg *config) checkOneLeader() int {
         if t, leader := cfg.rafts[i].GetState(); leader {
           leaders[t] = append(leaders[t], i)
         }
-        if iters == 0 {
-          t, leader := cfg.rafts[i].GetState()
-          fmt.Printf("checkOneLeader:%d: t %v, leader %v\n", i, t, leader)
-        }
+
+        t, leader := cfg.rafts[i].GetState()
+        Log("checkOneLeader:%d:S%d: t %v, leader %v\n", iters, i, t, leader)
       }
     }
-
     lastTermWithLeader := -1
     for t, leaders := range leaders {
       if len(leaders) > 1 {
@@ -311,7 +310,8 @@ func (cfg *config) checkTerms() int {
 func (cfg *config) checkNoLeader() {
   for i := 0; i < cfg.n; i++ {
     if cfg.connected[i] {
-      _, is_leader := cfg.rafts[i].GetState()
+      term, is_leader := cfg.rafts[i].GetState()
+      Log("checkNoLeader:S%d: t %v, leader %v\n", i, term, is_leader)
       if is_leader {
         cfg.t.Fatalf("expected no leader, but %v claims to be leader", i)
       }
