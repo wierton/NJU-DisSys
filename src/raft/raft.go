@@ -68,7 +68,7 @@ func (rf *Raft) log(format string, args ...interface{}) {
   nowStr := time.Now().Format("15:04:05.000")
   s := fmt.Sprintf("%s [S:%d,T:%d] ", nowStr, rf.me, rf.Term)
   s += fmt.Sprintf(format, args...)
-  fmt.Printf("%s", s)
+  // fmt.Printf("%s", s)
 }
 
 func (rf *Raft) rand(st, ed int) int {
@@ -167,7 +167,7 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
   if rf.Term < args.Term { rf.LeaderId = -1 }
 
   reply.VoteYou = !rf.hasVoteInThisTerm()
-  rf.LeaderId = args.ClientId
+  if reply.VoteYou { rf.LeaderId = args.ClientId }
   timeout := rf.ResetTimeout()
   rf.log("from %d, vote %v, n-timeout %v, n-term: %d\n", args.ClientId, reply.VoteYou,
     timeout, args.Term)
@@ -199,6 +199,21 @@ func (rf *Raft) WaitElectionTimeout() {
   }
 }
 
+func (rf *Raft) RPC(i int, svcMeth string, args interface{}, reply interface{}) bool {
+  replyOk := make(chan bool)
+  go func() {
+    replyOk <- rf.peers[i].Call(svcMeth, args, reply)
+  } ()
+
+  select {
+    case ok := <-replyOk:
+      return ok
+    case <- time.After(15 * time.Millisecond):
+      rf.log("wait.%s(%d) timeout\n", svcMeth, i)
+      return false
+  }
+}
+
 func (rf *Raft) LeaderElection() {
   for ;; {
     rf.mu.Lock()
@@ -206,6 +221,7 @@ func (rf *Raft) LeaderElection() {
     rf.mu.Unlock()
 
     rf.ResetTimeout()
+    rf.log("WaitElectionTimeout\n")
     rf.WaitElectionTimeout();
     if rf.Killed {
       rf.log("Killed detected, exit goroutine\n")
@@ -225,7 +241,8 @@ func (rf *Raft) LeaderElection() {
         rf.log("Killed detected, exit goroutine\n")
         return
       }
-      ok := rf.peers[i].Call("Raft.RequestVote", req, reply);
+      rf.log("wait.RequestVote(%d)\n", i)
+      ok := rf.RPC(i, "Raft.RequestVote", req, reply);
       if ok {
         total ++
         if reply.VoteYou { count ++ }
@@ -239,8 +256,8 @@ func (rf *Raft) LeaderElection() {
       rf.LeaderId = rf.me
       rf.mu.Unlock()
 
-      for ;; {
-        for i := 0; i < len(rf.peers); i ++ {
+      for ; rf.isLeader(); {
+        for i := 0; i < len(rf.peers) && rf.isLeader(); i ++ {
           if i == rf.me { continue }
           if rf.Killed {
             rf.log("Killed detected, exit goroutine\n")
@@ -248,7 +265,8 @@ func (rf *Raft) LeaderElection() {
           }
           req := AppendEntriesArgs { Term: rf.Term, ClientId: rf.me }
           reply := &AppendEntriesReply{}
-          rf.peers[i].Call("Raft.AppendEntries", req, reply);
+          rf.log("wait.AppendEntries(%d)\n", i)
+          rf.RPC(i, "Raft.AppendEntries", req, reply);
         }
         time.Sleep(10 * time.Millisecond)
       }

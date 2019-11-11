@@ -18,6 +18,7 @@ import "encoding/base64"
 import "sync/atomic"
 import "time"
 import "fmt"
+import "util"
 
 func randstring(n int) string {
   b := make([]byte, 2*n)
@@ -258,7 +259,7 @@ func (cfg *config) setlongreordering(longrel bool) {
 // check that there's exactly one leader.
 // try a few times in case re-elections are needed.
 func (cfg *config) checkOneLeader() int {
-  fmt.Printf("------\n")
+  util.Log("------\n")
   for iters := 0; iters < 10; iters++ {
     time.Sleep(500 * time.Millisecond)
     leaders := make(map[int][]int)
@@ -269,7 +270,7 @@ func (cfg *config) checkOneLeader() int {
         }
 
         t, leader := cfg.rafts[i].GetState()
-        Log("checkOneLeader:%d:S%d: t %v, leader %v\n", iters, i, t, leader)
+        util.Log("checkOneLeader:%d:S%d: t %v, leader %v\n", iters, i, t, leader)
       }
     }
     lastTermWithLeader := -1
@@ -311,7 +312,7 @@ func (cfg *config) checkNoLeader() {
   for i := 0; i < cfg.n; i++ {
     if cfg.connected[i] {
       term, is_leader := cfg.rafts[i].GetState()
-      Log("checkNoLeader:S%d: t %v, leader %v\n", i, term, is_leader)
+      util.Log("checkNoLeader:S%d: t %v, leader %v\n", i, term, is_leader)
       if is_leader {
         cfg.t.Fatalf("expected no leader, but %v claims to be leader", i)
       }
