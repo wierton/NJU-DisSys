@@ -48,6 +48,7 @@ type Raft struct {
   peers     []*labrpc.ClientEnd
   persister *Persister
   me        int // index into peers[]
+  applyCh   chan ApplyMsg
 
   // Your data here.
   // Look at the paper's Figure 2 for a description of what
@@ -55,6 +56,8 @@ type Raft struct {
   Killed    bool
   Term      int
   LeaderId  int
+  Logs      []interface{}
+  Index     int
   ElectionTimeout time.Time // miniseconds
 }
 
@@ -68,7 +71,7 @@ func (rf *Raft) log(format string, args ...interface{}) {
   nowStr := time.Now().Format("15:04:05.000")
   s := fmt.Sprintf("%s [S:%d,T:%d] ", nowStr, rf.me, rf.Term)
   s += fmt.Sprintf(format, args...)
-  // fmt.Printf("%s", s)
+  fmt.Printf("%s", s)
 }
 
 func (rf *Raft) rand(st, ed int) int {
@@ -174,19 +177,67 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
   rf.Term = args.Term
 }
 
+const (
+  AEMSG_1 = 1
+  AEMSG_2 = 2
+)
 
-type AppendEntriesArgs RequestVoteArgs
+type AppendEntriesArgs struct {
+  Msg      int
+  Term     int
+  ClientId int
+  Index    int
+  Logs     []interface{}
+}
 type AppendEntriesReply struct {
   Ok bool
+  Index    int
+  Logs     []interface{}
+}
+
+func dumpLogs(logs []interface{}) string {
+  s := fmt.Sprintf("{");
+  for i := 0; i < len(logs); i ++ {
+    c, ok := logs[i].(int)
+    if ok {
+      s += fmt.Sprintf("%d, ", c);
+    } else {
+      s += fmt.Sprintf("?, ");
+    }
+  }
+  s += fmt.Sprintf("}");
+  return s
 }
 
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
   rf.mu.Lock()
   defer rf.mu.Unlock()
 
+  if rf.Term > args.Term {
+    rf.log("from %d, bad heart beat\n", args.ClientId)
+    reply.Ok = false
+    return
+  }
+
   timeout := rf.ResetTimeout()
-  rf.log("from %d, heart beat, n-timeout %v, n-term %d\n", args.ClientId, timeout,
-    args.Term)
+  rf.log("from %d, heart beat %d, n-timeout %v, n-term %d\n", args.ClientId,
+    args.Msg, timeout, args.Term)
+  if args.Msg == AEMSG_1 {
+    reply.Logs = rf.Logs
+    reply.Index = rf.Index
+  } else if args.Msg == AEMSG_2 {
+    for i := rf.Index; i < len(args.Logs); i ++ {
+      rf.log("Commit %d, Index %d, Logs %d\n", args.Logs[i], rf.Index, len(args.Logs))
+      if i < len(rf.Logs) {
+        rf.Logs[i] = args.Logs[i]
+      } else {
+        rf.Logs = append(rf.Logs, args.Logs[i])
+      }
+      rf.Index ++
+      ap := ApplyMsg { Index:rf.Index, Command:args.Logs[i] }
+      rf.applyCh <- ap;
+    }
+  }
   rf.Term = args.Term
   rf.LeaderId = args.ClientId
   reply.Ok = true
@@ -233,21 +284,89 @@ func (rf *Raft) asCandidate() int {
   return count
 }
 
+func (rf *Raft) findMaxLogQueue(i int, max *int, q *[]interface{}) bool {
+  req := AppendEntriesArgs {
+    Msg: AEMSG_1,
+    Term: rf.Term, ClientId: rf.me,
+    Index: rf.Index, Logs: rf.Logs }
+  reply := &AppendEntriesReply{}
+
+  rf.log("wait.findMaxLogQueue(%d)\n", i)
+  ok := rf.RPC(i, "Raft.AppendEntries", req, reply);
+  if ok {
+    if reply.Index > *max {
+      *max = reply.Index
+      *q = reply.Logs
+    }
+    rf.log("findMaxLogQueue(%d) suc\n", i)
+  } else {
+    rf.log("findMaxLogQueue(%d) failed\n", i)
+  }
+  return ok
+}
+
+func (rf *Raft) commitLogs(i int, Index int) {
+  req := AppendEntriesArgs {
+    Msg: AEMSG_2,
+    Term: rf.Term, ClientId: rf.me,
+    Index: rf.Index, Logs: rf.Logs }
+  reply := &AppendEntriesReply{}
+
+  rf.log("wait.commitLogs(%d), Index: %d, logs: %s\n", i, Index, dumpLogs(rf.Logs))
+  ok := rf.RPC(i, "Raft.AppendEntries", req, reply);
+  if ok {
+    rf.log("commitLogs(%d) suc\n", i)
+  } else {
+    rf.log("commitLogs(%d) failed\n", i)
+  }
+}
+
 func (rf *Raft) asLeader() {
   rf.mu.Lock()
   rf.LeaderId = rf.me
   rf.mu.Unlock()
 
   for ; rf.isLeader(); {
+    var max int = 0
+    var queue []interface{}
+    count := 1
     for i := 0; i < len(rf.peers) && rf.isLeader(); i ++ {
       if i == rf.me { continue }
       if rf.Killed { rf.log("Killed\n"); return; }
-      req := AppendEntriesArgs { Term: rf.Term, ClientId: rf.me }
-      reply := &AppendEntriesReply{}
-
-      rf.log("wait.AppendEntries(%d)\n", i)
-      rf.RPC(i, "Raft.AppendEntries", req, reply);
+      ok := rf.findMaxLogQueue(i, &max, &queue)
+      if ok { count ++ }
     }
+
+    if count <= len(rf.peers) / 2 { continue }
+
+    rf.log("max is %d, logs is %s\n", max, dumpLogs(queue))
+    // sync logs firstly
+    if max > rf.Index {
+      for i := rf.Index; i < max; i ++ {
+        if i < len(rf.Logs) {
+          rf.mu.Lock()
+          rf.Logs[i] = queue[i]
+          rf.mu.Unlock()
+        } else {
+          rf.mu.Lock()
+          rf.Logs = append(rf.Logs, queue[i])
+          rf.mu.Unlock()
+        }
+        rf.Index ++
+        ap := ApplyMsg { Index:rf.Index, Command:rf.Logs[i] }
+        rf.log("Commit %d, Index %d, Logs %d\n", rf.Logs[i], rf.Index, len(rf.Logs))
+        rf.applyCh <- ap;
+      }
+    } else {
+      max = len(rf.Logs)
+    }
+
+    for i := 0; i < len(rf.peers) && rf.isLeader(); i ++ {
+      if i == rf.me { continue }
+      if rf.Killed { rf.log("Killed\n"); return; }
+      rf.commitLogs(i, max)
+    }
+
     time.Sleep(10 * time.Millisecond)
   }
 }
@@ -322,9 +441,16 @@ func (rf *Raft) sendRequestVote(server int, args RequestVoteArgs, reply *Request
 // the leader.
 //
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
-  index := -1
-
-  return index, rf.Term, rf.isLeader()
+  isLeader := rf.isLeader()
+  if isLeader {
+    rf.mu.Lock()
+    rf.Logs = append(rf.Logs, command)
+    c, _ := command.(int)
+    rf.log("Start %d, index %d, %s\n", c, rf.Index, dumpLogs(rf.Logs))
+    rf.mu.Unlock()
+    return len(rf.Logs), rf.Term, isLeader
+  }
+  return rf.Index, rf.Term, isLeader
 }
 
 //
@@ -357,6 +483,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.peers = peers
   rf.persister = persister
   rf.me = me
+  rf.Index = 0
+  rf.Term = 0
+  rf.applyCh = applyCh
+  rf.Logs = make([]interface{}, 0)
 
   // Your initialization code here.
   rf.Killed = false
