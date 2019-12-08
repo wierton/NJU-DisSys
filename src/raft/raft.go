@@ -233,8 +233,8 @@ func (rf *Raft) LeaderElection() {
     rf.incTerm()
     req := RequestVoteArgs { Term: rf.Term, ClientId: rf.me }
     reply := &RequestVoteReply{}
-    total := 0
-    count := 0
+    total := len(rf.peers)
+    count := 1
     for i := 0; i < len(rf.peers); i ++ {
       if i == rf.me { continue }
       if rf.Killed {
@@ -244,7 +244,6 @@ func (rf *Raft) LeaderElection() {
       rf.log("wait.RequestVote(%d)\n", i)
       ok := rf.RPC(i, "Raft.RequestVote", req, reply);
       if ok {
-        total ++
         if reply.VoteYou { count ++ }
       }
     }
