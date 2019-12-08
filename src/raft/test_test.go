@@ -379,8 +379,8 @@ func TestBackup(t *testing.T) {
 
   util.Log("lots more commands that won't commit\n")
   for i := 0; i < servers; i++ {
-    // rf := cfg.rafts[i]
-    // rf.DumpState()
+    rf := cfg.rafts[i]
+    rf.DumpState()
   }
   // lots more commands that won't commit
   for i := 0; i < 50; i++ {
@@ -391,8 +391,8 @@ func TestBackup(t *testing.T) {
 
   util.Log("bring original leader back to life,\n")
   for i := 0; i < servers; i++ {
-    // rf := cfg.rafts[i]
-    // rf.DumpState()
+    rf := cfg.rafts[i]
+    rf.DumpState()
   }
   // bring original leader back to life,
   for i := 0; i < servers; i++ {
@@ -408,8 +408,8 @@ func TestBackup(t *testing.T) {
     (leader1 + 3) % servers, (leader1 + 4) % servers,
     (leader1 + 0) % servers, (leader1 + 1) % servers)
   for i := 0; i < servers; i++ {
-    // rf := cfg.rafts[i]
-    // rf.DumpState()
+    rf := cfg.rafts[i]
+    rf.DumpState()
   }
   // lots of successful commands to new group.
   for i := 0; i < 50; i++ {
