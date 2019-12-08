@@ -22,8 +22,8 @@ import "labrpc"
 
 import "math/rand"
 import "time"
-// import "bytes"
-// import "encoding/gob"
+import "bytes"
+import "encoding/gob"
 
 // import "runtime/debug"
 import "fmt"
@@ -49,6 +49,7 @@ type Raft struct {
   persister *Persister
   me        int // index into peers[]
   applyCh   chan ApplyMsg
+  persisted bool
 
   // Your data here.
   // Look at the paper's Figure 2 for a description of what
@@ -72,7 +73,7 @@ func (rf *Raft) Dlog(format string, args ...interface{}) {
   nowStr := time.Now().Format("15:04:05.000")
   s := fmt.Sprintf("%s [S:%d,T:%02d] ", nowStr, rf.me, rf.Term)
   s += fmt.Sprintf(format, args...)
-  fmt.Printf("%s", s)
+  // fmt.Printf("%s", s)
 }
 
 func (rf *Raft) rand(st, ed int) int {
@@ -134,6 +135,16 @@ func (rf *Raft) persist() {
   // e.Encode(rf.yyy)
   // data := w.Bytes()
   // rf.persister.SaveRaftState(data)
+  w := new(bytes.Buffer)
+  e := gob.NewEncoder(w)
+  rf.persisted=true
+  e.Encode(rf.persisted)
+  e.Encode(rf.me)
+  e.Encode(rf.Term)
+  e.Encode(rf.LeaderId)
+  e.Encode(rf.Logs)
+  e.Encode(rf.Index)
+  rf.persister.SaveRaftState(w.Bytes())
 }
 
 //
@@ -146,6 +157,17 @@ func (rf *Raft) readPersist(data []byte) {
   // d := gob.NewDecoder(r)
   // d.Decode(&rf.xxx)
   // d.Decode(&rf.yyy)
+  r := bytes.NewBuffer(data)
+  d := gob.NewDecoder(r)
+  d.Decode(&rf.persisted)
+  if ! rf.persisted {
+    return
+  }
+  d.Decode(&rf.me)
+  d.Decode(&rf.Term)
+  d.Decode(&rf.LeaderId)
+  d.Decode(&rf.Logs)
+  d.Decode(&rf.Index)
 }
 
 //
@@ -247,9 +269,11 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
       } else {
         rf.Logs = append(rf.Logs, args.Logs[i])
       }
+      rf.persist()
       rf.Index ++
       ap := ApplyMsg { Index:rf.Index, Command:args.Logs[i] }
       rf.applyCh <- ap;
+      rf.persist()
     }
   } else if args.Msg == AEMSG_3 {
     rf.KnownMax = args.Index
@@ -376,6 +400,7 @@ func (rf *Raft) asLeader() {
     var kmax int = 0
     var max int = 0
     var queue []interface{}
+    rf.persist()
     count := 1
     for i := 0; i < len(rf.peers) && rf.isLeader(); i ++ {
       if i == rf.me { continue }
@@ -413,10 +438,12 @@ func (rf *Raft) asLeader() {
           rf.Logs = append(rf.Logs, queue[i])
           rf.mu.Unlock()
         }
+        rf.persist()
         rf.Index ++
         ap := ApplyMsg { Index:rf.Index, Command:rf.Logs[i] }
         rf.Dlog("Commit %d, Index %d, Logs %d\n", rf.Logs[i], rf.Index, len(rf.Logs))
         rf.applyCh <- ap;
+        rf.persist()
       }
     } else {
       max = len(rf.Logs)
@@ -439,12 +466,19 @@ func (rf *Raft) asFollower() {
   rf.mu.Unlock()
 
   rf.ResetTimeout()
+<<<<<<< HEAD
   rf.Dlog("WaitElectionTimeout\n")
+=======
+  rf.persist()
+  rf.log("WaitElectionTimeout\n")
+>>>>>>> submit
   rf.WaitElectionTimeout();
 }
 
 func (rf *Raft) MainLoop() {
+  isLeader := rf.isLeader()
   for ;; {
+<<<<<<< HEAD
     rf.asFollower();
     if rf.Killed { rf.Dlog("Killed\n"); return; }
 
@@ -455,12 +489,28 @@ func (rf *Raft) MainLoop() {
     if count > total / 2 {
       // as leader
       rf.Dlog("leader mode %d/%d\n", count, total)
+=======
+    if (isLeader) {
+>>>>>>> submit
       rf.asLeader()
+      isLeader = false
     } else {
+<<<<<<< HEAD
       // as follower
       rf.Dlog("follower mode\n")
     }
     if rf.Killed { rf.Dlog("Killed\n"); return; }
+=======
+      rf.asFollower();
+      count := rf.asCandidate()
+      total := len(rf.peers)
+      if count > total / 2 {
+        isLeader = true
+        rf.asLeader()
+        continue
+      }
+    }
+>>>>>>> submit
   }
 }
 
@@ -547,15 +597,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.me = me
   rf.Index = 0
   rf.Term = 0
+  rf.LeaderId = -1
   rf.applyCh = applyCh
   rf.Logs = make([]interface{}, 0)
 
   // Your initialization code here.
   rf.Killed = false
-  go rf.MainLoop()
 
   // initialize from state persisted before a crash
   rf.readPersist(persister.ReadRaftState())
+  go rf.MainLoop()
 
   return rf
 }
