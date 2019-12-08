@@ -194,7 +194,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 func (rf *Raft) WaitElectionTimeout() {
   for ; time.Now().Before(rf.ElectionTimeout); {
-    if rf.Killed { return }
+    if rf.Killed { rf.log("Killed\n"); return; }
     time.Sleep(1 * time.Millisecond)
   }
 }
@@ -214,65 +214,72 @@ func (rf *Raft) RPC(i int, svcMeth string, args interface{}, reply interface{}) 
   }
 }
 
-func (rf *Raft) LeaderElection() {
-  for ;; {
-    rf.mu.Lock()
-    rf.LeaderId = -1
-    rf.mu.Unlock()
-
-    rf.ResetTimeout()
-    rf.log("WaitElectionTimeout\n")
-    rf.WaitElectionTimeout();
-    if rf.Killed {
-      rf.log("Killed detected, exit goroutine\n")
-      return
+func (rf *Raft) asCandidate() int {
+  // as candidate
+  rf.log("candidate mode, update term to %d\n", rf.Term + 1)
+  rf.incTerm()
+  req := RequestVoteArgs { Term: rf.Term, ClientId: rf.me }
+  reply := &RequestVoteReply{}
+  count := 1
+  for i := 0; i < len(rf.peers); i ++ {
+    if i == rf.me { continue }
+    if rf.Killed { rf.log("Killed\n"); return 0; }
+    rf.log("wait.RequestVote(%d)\n", i)
+    ok := rf.RPC(i, "Raft.RequestVote", req, reply);
+    if ok {
+      if reply.VoteYou { count ++ }
     }
+  }
+  return count
+}
 
-    // as candidate
-    rf.log("candidate mode, update term to %d\n", rf.Term + 1)
-    rf.incTerm()
-    req := RequestVoteArgs { Term: rf.Term, ClientId: rf.me }
-    reply := &RequestVoteReply{}
-    total := len(rf.peers)
-    count := 1
-    for i := 0; i < len(rf.peers); i ++ {
+func (rf *Raft) asLeader() {
+  rf.mu.Lock()
+  rf.LeaderId = rf.me
+  rf.mu.Unlock()
+
+  for ; rf.isLeader(); {
+    for i := 0; i < len(rf.peers) && rf.isLeader(); i ++ {
       if i == rf.me { continue }
-      if rf.Killed {
-        rf.log("Killed detected, exit goroutine\n")
-        return
-      }
-      rf.log("wait.RequestVote(%d)\n", i)
-      ok := rf.RPC(i, "Raft.RequestVote", req, reply);
-      if ok {
-        if reply.VoteYou { count ++ }
-      }
-    }
+      if rf.Killed { rf.log("Killed\n"); return; }
+      req := AppendEntriesArgs { Term: rf.Term, ClientId: rf.me }
+      reply := &AppendEntriesReply{}
 
-    // as leader
+      rf.log("wait.AppendEntries(%d)\n", i)
+      rf.RPC(i, "Raft.AppendEntries", req, reply);
+    }
+    time.Sleep(10 * time.Millisecond)
+  }
+}
+
+func (rf *Raft) asFollower() {
+  rf.mu.Lock()
+  rf.LeaderId = -1
+  rf.mu.Unlock()
+
+  rf.ResetTimeout()
+  rf.log("WaitElectionTimeout\n")
+  rf.WaitElectionTimeout();
+}
+
+func (rf *Raft) MainLoop() {
+  for ;; {
+    rf.asFollower();
+    if rf.Killed { rf.log("Killed\n"); return; }
+
+    count := rf.asCandidate()
+    if rf.Killed { rf.log("Killed\n"); return; }
+
+    total := len(rf.peers)
     if count > total / 2 {
+      // as leader
       rf.log("leader mode %d/%d\n", count, total)
-      rf.mu.Lock()
-      rf.LeaderId = rf.me
-      rf.mu.Unlock()
-
-      for ; rf.isLeader(); {
-        for i := 0; i < len(rf.peers) && rf.isLeader(); i ++ {
-          if i == rf.me { continue }
-          if rf.Killed {
-            rf.log("Killed detected, exit goroutine\n")
-            return
-          }
-          req := AppendEntriesArgs { Term: rf.Term, ClientId: rf.me }
-          reply := &AppendEntriesReply{}
-          rf.log("wait.AppendEntries(%d)\n", i)
-          rf.RPC(i, "Raft.AppendEntries", req, reply);
-        }
-        time.Sleep(10 * time.Millisecond)
-      }
+      rf.asLeader()
+    } else {
+      // as follower
+      rf.log("follower mode\n")
     }
-
-    // as follower
-    rf.log("follower mode\n")
+    if rf.Killed { rf.log("Killed\n"); return; }
   }
 }
 
@@ -353,7 +360,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
   // Your initialization code here.
   rf.Killed = false
-  go rf.LeaderElection()
+  go rf.MainLoop()
 
   // initialize from state persisted before a crash
   rf.readPersist(persister.ReadRaftState())
