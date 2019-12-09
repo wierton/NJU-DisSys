@@ -67,7 +67,7 @@ func (rf *Raft) Dlog(format string, args ...interface{}) {
   nowStr := time.Now().Format("15:04:05.000")
   s := fmt.Sprintf("%s [S:%d,T:%d] ", nowStr, rf.me, rf.Term)
   s += fmt.Sprintf(format, args...)
-  // fmt.Printf("%s", s)
+  fmt.Printf("%s", s)
 }
 
 func (rf *Raft) rand(st, ed int) int {
@@ -349,13 +349,14 @@ func (rf *Raft) asLeader() {
     rf.persist()
 
     count := 1
+    LogsLen := len(rf.Logs)
     for i := 0; i < len(rf.peers) && rf.isLeader(); i ++ {
       if i == rf.me { continue }
-      ok := rf.syncLogs(i, len(rf.Logs))
+      ok := rf.syncLogs(i, LogsLen)
       if ok { count ++ }
     }
     if count > len(rf.peers) / 2 {
-      rf.Index = len(rf.Logs)
+      rf.Index = LogsLen
     }
 
     if rf.Killed { rf.Dlog("Killed\n"); return; }
