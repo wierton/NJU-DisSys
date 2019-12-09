@@ -63,17 +63,11 @@ type Raft struct {
   ElectionTimeout time.Time // miniseconds
 }
 
-const (
-  RaftModeFollower = 0
-  RaftModeCandidate = 1
-  RaftModeLeader = 2
-)
-
 func (rf *Raft) Dlog(format string, args ...interface{}) {
   nowStr := time.Now().Format("15:04:05.000")
   s := fmt.Sprintf("%s [S:%d,T:%d] ", nowStr, rf.me, rf.Term)
   s += fmt.Sprintf(format, args...)
-  fmt.Printf("%s", s)
+  // fmt.Printf("%s", s)
 }
 
 func (rf *Raft) rand(st, ed int) int {

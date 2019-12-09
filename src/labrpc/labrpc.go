@@ -57,8 +57,6 @@ import "strings"
 import "math/rand"
 import "time"
 
-import "util"
-
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
 	svcMeth  string      // e.g. "Raft.AppendEntries"
@@ -236,20 +234,16 @@ func (rn *Network) ProcessReq(req reqMsg) {
 
 		if replyOK == false || serverDead == true {
 			// server was killed while we were waiting; return error.
-            util.Log("S%d: server dead\n", servername)
 			req.replyCh <- replyMsg{false, nil}
 		} else if reliable == false && (rand.Int()%1000) < 100 {
 			// drop the reply, return as if timeout
-            util.Log("S%d: unreliable, dropped\n", servername)
 			req.replyCh <- replyMsg{false, nil}
 		} else if longreordering == true && rand.Intn(900) < 600 {
 			// delay the response for a while
-            util.Log("S%d: longreordering\n", servername)
 			ms := 200 + rand.Intn(1+rand.Intn(2000))
 			time.Sleep(time.Duration(ms) * time.Millisecond)
 			req.replyCh <- reply
 		} else {
-            util.Log("S%d: normal\n", servername)
 			req.replyCh <- reply
 		}
 	} else {
@@ -258,13 +252,10 @@ func (rn *Network) ProcessReq(req reqMsg) {
 		if rn.longDelays {
 			// let Raft tests check that leader doesn't send
 			// RPCs synchronously.
-            util.Log("S%d: long delay, enabled %v, server %v\n", servername, enabled,
-              server)
 			ms = (rand.Int() % 7000)
 		} else {
 			// many kv tests require the client to try each
 			// server in fairly rapid succession.
-            util.Log("S%d: short delay\n", servername)
 			ms = (rand.Int() % 100)
 		}
 		time.Sleep(time.Duration(ms) * time.Millisecond)
