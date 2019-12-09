@@ -304,6 +304,7 @@ func TestRejoin(t *testing.T) {
 
   // leader network failure
   leader1 := cfg.checkOneLeader()
+  util.Log("disconnect %d\n", leader1)
   cfg.disconnect(leader1)
 
   // make old leader try to agree on some entries
@@ -316,14 +317,17 @@ func TestRejoin(t *testing.T) {
 
   // new leader network failure
   leader2 := cfg.checkOneLeader()
+  util.Log("disconnect %d\n", leader2)
   cfg.disconnect(leader2)
 
   // old leader connected again
+  util.Log("connect %d\n", leader1)
   cfg.connect(leader1)
 
   cfg.one(104, 2)
 
   // all together now
+  util.Log("connect %d\n", leader2)
   cfg.connect(leader2)
 
   cfg.one(105, servers)
@@ -379,8 +383,8 @@ func TestBackup(t *testing.T) {
 
   util.Log("lots more commands that won't commit\n")
   for i := 0; i < servers; i++ {
-    rf := cfg.rafts[i]
-    rf.DumpState()
+    // rf := cfg.rafts[i]
+    // rf.DumpState()
   }
   // lots more commands that won't commit
   for i := 0; i < 50; i++ {
@@ -391,8 +395,8 @@ func TestBackup(t *testing.T) {
 
   util.Log("bring original leader back to life,\n")
   for i := 0; i < servers; i++ {
-    rf := cfg.rafts[i]
-    rf.DumpState()
+    // rf := cfg.rafts[i]
+    // rf.DumpState()
   }
   // bring original leader back to life,
   for i := 0; i < servers; i++ {
@@ -408,8 +412,8 @@ func TestBackup(t *testing.T) {
     (leader1 + 3) % servers, (leader1 + 4) % servers,
     (leader1 + 0) % servers, (leader1 + 1) % servers)
   for i := 0; i < servers; i++ {
-    rf := cfg.rafts[i]
-    rf.DumpState()
+    // rf := cfg.rafts[i]
+    // rf.DumpState()
   }
   // lots of successful commands to new group.
   for i := 0; i < 50; i++ {

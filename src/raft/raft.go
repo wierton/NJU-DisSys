@@ -59,7 +59,7 @@ type Raft struct {
   LeaderId  int
   Logs      []interface{}
   Index     int
-  KnownMax  int
+  LastApplied int
   ElectionTimeout time.Time // miniseconds
 }
 
@@ -71,9 +71,9 @@ const (
 
 func (rf *Raft) Dlog(format string, args ...interface{}) {
   nowStr := time.Now().Format("15:04:05.000")
-  s := fmt.Sprintf("%s [S:%d,T:%02d] ", nowStr, rf.me, rf.Term)
+  s := fmt.Sprintf("%s [S:%d,T:%d] ", nowStr, rf.me, rf.Term)
   s += fmt.Sprintf(format, args...)
-  // fmt.Printf("%s", s)
+  fmt.Printf("%s", s)
 }
 
 func (rf *Raft) rand(st, ed int) int {
@@ -115,12 +115,6 @@ func (rf *Raft) GetState() (int, bool) {
   return rf.Term, rf.isLeader()
 }
 
-func (rf *Raft) DumpState() {
-  // Your code here.
-  rf.Dlog("Leader %d, KMax %d, Index %d, Logs: %s\n", rf.LeaderId,
-    rf.KnownMax, rf.Index, dumpLogs(rf.Logs))
-}
-
 //
 // save Raft's persistent state to stable storage,
 // where it can later be retrieved after a crash and restart.
@@ -144,6 +138,7 @@ func (rf *Raft) persist() {
   e.Encode(rf.LeaderId)
   e.Encode(rf.Logs)
   e.Encode(rf.Index)
+  e.Encode(rf.LastApplied)
   rf.persister.SaveRaftState(w.Bytes())
 }
 
@@ -168,6 +163,7 @@ func (rf *Raft) readPersist(data []byte) {
   d.Decode(&rf.LeaderId)
   d.Decode(&rf.Logs)
   d.Decode(&rf.Index)
+  d.Decode(&rf.LastApplied)
 }
 
 //
@@ -185,6 +181,18 @@ type RequestVoteArgs struct {
 type RequestVoteReply struct {
   // Your data here.
   VoteYou  bool
+  Index    int
+  Logs     []interface{}
+}
+
+func copyLogs(to *[]interface{}, from []interface{}, B, E int) {
+  for i := B; i < E; i ++ {
+    if i < len(*to) {
+      (*to)[i] = from[i]
+    } else {
+      *to = append(*to, from[i])
+    }
+  }
 }
 
 //
@@ -199,21 +207,18 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
   if rf.Term < args.Term { rf.LeaderId = -1 }
 
   reply.VoteYou = !rf.hasVoteInThisTerm()
-  if reply.VoteYou { rf.LeaderId = args.ClientId }
+  if reply.VoteYou {
+    rf.LeaderId = args.ClientId
+    reply.Index = rf.Index
+    reply.Logs = rf.Logs
+  }
   timeout := rf.ResetTimeout()
   rf.Dlog("from %d, vote %v, n-timeout %v, n-term: %d\n", args.ClientId, reply.VoteYou,
     timeout, args.Term)
   rf.Term = args.Term
 }
 
-const (
-  AEMSG_1 = 1
-  AEMSG_2 = 2
-  AEMSG_3 = 3
-)
-
 type AppendEntriesArgs struct {
-  Msg      int
   Term     int
   ClientId int
   Index    int
@@ -222,7 +227,6 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
   Ok bool
   Index    int
-  KnownMax int
   Logs     []interface{}
 }
 
@@ -230,15 +234,29 @@ func dumpLogs(logs []interface{}) string {
   s := fmt.Sprintf("{");
   for i := 0; i < len(logs); i ++ {
     c, ok := logs[i].(int)
-    s += fmt.Sprintf("%d:", i + 1)
     if ok {
-      s += fmt.Sprintf("%d, ", c)
+      s += fmt.Sprintf("%d, ", c);
     } else {
-      s += fmt.Sprintf("?, ")
+      s += fmt.Sprintf("?, ");
     }
   }
-  s += fmt.Sprintf("}")
+  s += fmt.Sprintf("}");
   return s
+}
+
+func (rf *Raft) ApplyChangesLoop() {
+  for ; !rf.Killed; {
+    for ; rf.LastApplied < rf.Index; {
+      ap := ApplyMsg { Index:rf.LastApplied + 1, Command:rf.Logs[rf.LastApplied] }
+      rf.Dlog("Commit %d, Index %d %d, Logs %d\n", rf.Logs[rf.LastApplied],
+          rf.LastApplied, rf.Index, len(rf.Logs))
+      rf.persist()
+      rf.LastApplied ++
+      rf.applyCh <- ap
+      rf.persist()
+    }
+    time.Sleep(1 * time.Millisecond)
+  }
 }
 
 func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -252,31 +270,13 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
   }
 
   timeout := rf.ResetTimeout()
-  rf.Dlog("from %d, heart beat %d, index %d, n-timeout %v, n-term %d, logs %s\n",
-    args.ClientId, args.Msg, args.Index, timeout, args.Term, dumpLogs(args.Logs))
-  if args.Msg == AEMSG_1 {
-    // FIXME
-    reply.Logs = make([]interface{}, len(rf.Logs))
-    copy(reply.Logs, rf.Logs)
-    reply.Index = rf.Index
-    reply.KnownMax = rf.KnownMax
-  } else if args.Msg == AEMSG_2 {
-    for i := rf.Index; i < len(args.Logs); i ++ {
-      rf.Dlog("Commit %d, Index %d, Logs %d:%s\n", args.Logs[i], rf.Index,
-        len(args.Logs), dumpLogs(args.Logs))
-      if i < len(rf.Logs) {
-        rf.Logs[i] = args.Logs[i]
-      } else {
-        rf.Logs = append(rf.Logs, args.Logs[i])
-      }
-      rf.persist()
-      rf.Index ++
-      ap := ApplyMsg { Index:rf.Index, Command:args.Logs[i] }
-      rf.applyCh <- ap;
-      rf.persist()
-    }
-  } else if args.Msg == AEMSG_3 {
-    rf.KnownMax = args.Index
+  rf.Dlog("from %d, n-timeout %v, n-term %d, Index %d %d\n", args.ClientId,
+      timeout, args.Term, rf.Index, args.Index)
+  if len(args.Logs) > rf.Index {
+    copyLogs(&rf.Logs, args.Logs, rf.Index, len(args.Logs))
+  }
+  if args.Index > rf.Index {
+    rf.Index = args.Index
   }
   rf.Term = args.Term
   rf.LeaderId = args.ClientId
@@ -298,14 +298,11 @@ func (rf *Raft) RPC(i int, svcMeth string, args interface{}, reply interface{}) 
 
   select {
     case ok := <-replyOk:
-      rf.Dlog("RPC %s return %v\n", svcMeth, ok)
       return ok
     case <- time.After(15 * time.Millisecond):
       rf.Dlog("wait.%s(%d) timeout\n", svcMeth, i)
       return false
   }
-  rf.Dlog("RPC %s return %v\n", svcMeth, false)
-  return false
 }
 
 func (rf *Raft) asCandidate() int {
@@ -320,75 +317,33 @@ func (rf *Raft) asCandidate() int {
     if rf.Killed { rf.Dlog("Killed\n"); return 0; }
     rf.Dlog("wait.RequestVote(%d)\n", i)
     ok := rf.RPC(i, "Raft.RequestVote", req, reply);
-    if ok {
-      if reply.VoteYou { count ++ }
+    if ok && reply.VoteYou {
+      count ++
+      if reply.Index > rf.Index {
+        copyLogs(&rf.Logs, reply.Logs, rf.Index, reply.Index)
+        rf.Index = reply.Index
+      }
     }
   }
+  rf.Dlog("candidate mode end %d, logs %s\n", count, dumpLogs(rf.Logs))
   return count
 }
 
-func (rf *Raft) findMaxLogQueue(i int, max *int, q *[]interface{}, kmax *int) bool {
-  Logs := make([]interface{}, len(rf.Logs))
-  copy(Logs, rf.Logs)
+func (rf *Raft) syncLogs(i int, Index int) bool {
   req := AppendEntriesArgs {
-    Msg: AEMSG_1,
     Term: rf.Term, ClientId: rf.me,
-    Index: rf.Index, Logs: Logs }
+    Index: rf.Index, Logs: rf.Logs }
   reply := &AppendEntriesReply{}
 
-  rf.Dlog("wait.findMaxLogQueue(%d)\n", i)
+  rf.Dlog("wait.syncLogs(%d), Index: %d, logs: %s\n", i, Index, dumpLogs(rf.Logs))
   ok := rf.RPC(i, "Raft.AppendEntries", req, reply);
   ok = ok && reply.Ok
   if ok {
-    if reply.Index > *max {
-      *max = reply.Index
-      *q = reply.Logs
-    }
-    if reply.KnownMax > *kmax {
-      *kmax = reply.KnownMax
-    }
-    rf.Dlog("findMaxLogQueue(%d) suc, with %d, k %d, %s\n", i, reply.Index,
-      reply.KnownMax, dumpLogs(reply.Logs))
+    rf.Dlog("syncLogs(%d) suc\n", i)
   } else {
-    rf.Dlog("findMaxLogQueue(%d) failed\n", i)
+    rf.Dlog("syncLogs(%d) failed\n", i)
   }
   return ok
-}
-
-func (rf *Raft) commitLogs(i int, Index int) {
-  Logs := make([]interface{}, len(rf.Logs))
-  copy(Logs, rf.Logs)
-  req := AppendEntriesArgs {
-    Msg: AEMSG_2,
-    Term: rf.Term, ClientId: rf.me,
-    Index: rf.Index, Logs: Logs }
-  reply := &AppendEntriesReply{}
-
-  rf.Dlog("wait.commitLogs(%d), Index: %d, logs: %s\n", i, Index, dumpLogs(Logs))
-  ok := rf.RPC(i, "Raft.AppendEntries", req, reply);
-  ok = ok && reply.Ok
-  if ok {
-    rf.Dlog("commitLogs(%d) suc\n", i)
-  } else {
-    rf.Dlog("commitLogs(%d) failed\n", i)
-  }
-}
-
-func (rf *Raft) informMax(i int, Max int) {
-  req := AppendEntriesArgs {
-    Msg: AEMSG_3,
-    Term: rf.Term, ClientId: rf.me,
-    Index: Max }
-  reply := &AppendEntriesReply{}
-
-  rf.Dlog("wait.informMax(%d), Index: %d\n", i, Max)
-  ok := rf.RPC(i, "Raft.AppendEntries", req, reply);
-  ok = ok && reply.Ok
-  if ok {
-    rf.Dlog("informMax(%d) suc\n", i)
-  } else {
-    rf.Dlog("informMax(%d) failed\n", i)
-  }
 }
 
 func (rf *Raft) asLeader() {
@@ -397,65 +352,19 @@ func (rf *Raft) asLeader() {
   rf.mu.Unlock()
 
   for ; rf.isLeader(); {
-    var kmax int = 0
-    var max int = 0
-    var queue []interface{}
     rf.persist()
+
     count := 1
     for i := 0; i < len(rf.peers) && rf.isLeader(); i ++ {
       if i == rf.me { continue }
-      if rf.Killed { rf.Dlog("Killed\n"); return; }
-      ok := rf.findMaxLogQueue(i, &max, &queue, &kmax)
+      ok := rf.syncLogs(i, len(rf.Logs))
       if ok { count ++ }
     }
-
-    if (kmax > max) {
-      time.Sleep(10 * time.Millisecond)
-      continue
+    if count > len(rf.peers) / 2 {
+      rf.Index = len(rf.Logs)
     }
 
-    if ! rf.isLeader() { break }
-    if count <= len(rf.peers) / 2 { continue }
-
-    for i := 0; i < len(rf.peers) && rf.isLeader(); i ++ {
-      if i == rf.me { continue }
-      if rf.Killed { rf.Dlog("Killed\n"); return; }
-      M := max
-      if rf.Index > M { M = rf.Index }
-      rf.informMax(i, M)
-    }
-
-    rf.Dlog("max is %d, logs is %s\n", max, dumpLogs(queue))
-    // sync logs firstly
-    if max > rf.Index {
-      for i := rf.Index; i < max; i ++ {
-        if i < len(rf.Logs) {
-          rf.mu.Lock()
-          rf.Logs[i] = queue[i]
-          rf.mu.Unlock()
-        } else {
-          rf.mu.Lock()
-          rf.Logs = append(rf.Logs, queue[i])
-          rf.mu.Unlock()
-        }
-        rf.persist()
-        rf.Index ++
-        ap := ApplyMsg { Index:rf.Index, Command:rf.Logs[i] }
-        rf.Dlog("Commit %d, Index %d, Logs %d\n", rf.Logs[i], rf.Index, len(rf.Logs))
-        rf.applyCh <- ap;
-        rf.persist()
-      }
-    } else {
-      max = len(rf.Logs)
-    }
-
-    if ! rf.isLeader() { break }
-    for i := 0; i < len(rf.peers) && rf.isLeader(); i ++ {
-      if i == rf.me { continue }
-      if rf.Killed { rf.Dlog("Killed\n"); return; }
-      rf.commitLogs(i, max)
-    }
-
+    if rf.Killed { rf.Dlog("Killed\n"); return; }
     time.Sleep(10 * time.Millisecond)
   }
 }
@@ -466,41 +375,19 @@ func (rf *Raft) asFollower() {
   rf.mu.Unlock()
 
   rf.ResetTimeout()
-<<<<<<< HEAD
-  rf.Dlog("WaitElectionTimeout\n")
-=======
   rf.persist()
-  rf.log("WaitElectionTimeout\n")
->>>>>>> submit
+  rf.Dlog("WaitElectionTimeout\n")
   rf.WaitElectionTimeout();
 }
 
 func (rf *Raft) MainLoop() {
   isLeader := rf.isLeader()
+  go rf.ApplyChangesLoop()
   for ;; {
-<<<<<<< HEAD
-    rf.asFollower();
-    if rf.Killed { rf.Dlog("Killed\n"); return; }
-
-    count := rf.asCandidate()
-    if rf.Killed { rf.Dlog("Killed\n"); return; }
-
-    total := len(rf.peers)
-    if count > total / 2 {
-      // as leader
-      rf.Dlog("leader mode %d/%d\n", count, total)
-=======
     if (isLeader) {
->>>>>>> submit
       rf.asLeader()
       isLeader = false
     } else {
-<<<<<<< HEAD
-      // as follower
-      rf.Dlog("follower mode\n")
-    }
-    if rf.Killed { rf.Dlog("Killed\n"); return; }
-=======
       rf.asFollower();
       count := rf.asCandidate()
       total := len(rf.peers)
@@ -510,7 +397,6 @@ func (rf *Raft) MainLoop() {
         continue
       }
     }
->>>>>>> submit
   }
 }
 
@@ -595,6 +481,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
   rf.peers = peers
   rf.persister = persister
   rf.me = me
+  rf.LastApplied = 0
   rf.Index = 0
   rf.Term = 0
   rf.LeaderId = -1
