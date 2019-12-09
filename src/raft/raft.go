@@ -65,7 +65,8 @@ type Raft struct {
 
 func (rf *Raft) Dlog(format string, args ...interface{}) {
   nowStr := time.Now().Format("15:04:05.000")
-  s := fmt.Sprintf("%s [S:%d,T:%d] ", nowStr, rf.me, rf.Term)
+  s := fmt.Sprintf("%s [S:%d,T:%2d,L:%2d,I:%2d %2d] ", nowStr, rf.me, rf.Term, rf.LeaderId,
+    rf.LastApplied, rf.Index)
   s += fmt.Sprintf(format, args...)
   fmt.Printf("%s", s)
 }
@@ -244,7 +245,7 @@ func (rf *Raft) ApplyChangesLoop() {
     for ; rf.LastApplied < rf.Index; {
       ap := ApplyMsg { Index:rf.LastApplied + 1, Command:rf.Logs[rf.LastApplied] }
       rf.Dlog("Commit %d, Index %d %d, Logs %d\n", rf.Logs[rf.LastApplied],
-          rf.LastApplied, rf.Index, len(rf.Logs))
+          rf.LastApplied + 1, rf.Index, len(rf.Logs))
       rf.persist()
       rf.LastApplied ++
       rf.applyCh <- ap
@@ -280,7 +281,7 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
 
 func (rf *Raft) WaitElectionTimeout() {
   for ; time.Now().Before(rf.ElectionTimeout); {
-    if rf.Killed { rf.Dlog("Killed\n"); return; }
+    if rf.Killed { return; }
     time.Sleep(1 * time.Millisecond)
   }
 }
@@ -308,8 +309,8 @@ func (rf *Raft) asCandidate() int {
   reply := &RequestVoteReply{}
   count := 1
   for i := 0; i < len(rf.peers); i ++ {
+    if rf.Killed { return 0; }
     if i == rf.me { continue }
-    if rf.Killed { rf.Dlog("Killed\n"); return 0; }
     rf.Dlog("wait.RequestVote(%d)\n", i)
     ok := rf.RPC(i, "Raft.RequestVote", req, reply);
     if ok && reply.VoteYou {
@@ -352,6 +353,7 @@ func (rf *Raft) asLeader() {
     count := 1
     LogsLen := len(rf.Logs)
     for i := 0; i < len(rf.peers) && rf.isLeader(); i ++ {
+      if rf.Killed { return; }
       if i == rf.me { continue }
       ok := rf.syncLogs(i, LogsLen)
       if ok { count ++ }
@@ -360,7 +362,7 @@ func (rf *Raft) asLeader() {
       rf.Index = LogsLen
     }
 
-    if rf.Killed { rf.Dlog("Killed\n"); return; }
+    if rf.Killed { return; }
     time.Sleep(10 * time.Millisecond)
   }
 }
@@ -379,23 +381,22 @@ func (rf *Raft) asFollower() {
 func (rf *Raft) MainLoop() {
   isLeader := rf.isLeader()
   go rf.ApplyChangesLoop()
-  for ;; {
+  for ; !rf.Killed; {
     if (isLeader) {
       rf.asLeader()
       isLeader = false
     } else {
       rf.asFollower();
       count := rf.asCandidate()
-      if rf.Killed { rf.Dlog("Killed\n"); return; }
+      if rf.Killed { continue; }
       total := len(rf.peers)
       if count > total / 2 {
         isLeader = true
-        rf.asLeader()
         continue
       }
     }
-    if rf.Killed { rf.Dlog("Killed\n"); return; }
   }
+  rf.Dlog("Killed\n");
 }
 
 //
