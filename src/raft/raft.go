@@ -158,6 +158,7 @@ func (rf *Raft) readPersist(data []byte) {
   d.Decode(&rf.Logs)
   d.Decode(&rf.Index)
   d.Decode(&rf.LastApplied)
+  rf.Dlog("Recovered\n")
 }
 
 //
@@ -385,6 +386,7 @@ func (rf *Raft) MainLoop() {
     } else {
       rf.asFollower();
       count := rf.asCandidate()
+      if rf.Killed { rf.Dlog("Killed\n"); return; }
       total := len(rf.peers)
       if count > total / 2 {
         isLeader = true
@@ -392,6 +394,7 @@ func (rf *Raft) MainLoop() {
         continue
       }
     }
+    if rf.Killed { rf.Dlog("Killed\n"); return; }
   }
 }
 
