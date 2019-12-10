@@ -207,11 +207,13 @@ func (rf *Raft) RequestVote(args RequestVoteArgs, reply *RequestVoteReply) {
     rf.LeaderId = args.ClientId
     reply.Index = rf.Index
     reply.Logs = rf.Logs
+    rf.persist()
   }
   timeout := rf.ResetTimeout()
-  rf.Dlog("from %d, vote %v, n-timeout %v, n-term: %d\n", args.ClientId, reply.VoteYou,
-    timeout, args.Term)
+  rf.Dlog("from %d, vote %v, n-timeout %v, n-term: %d, Logs %d %d %s\n", args.ClientId,
+    reply.VoteYou, timeout, args.Term, rf.LastApplied, rf.Index, dumpLogs(rf.Logs))
   rf.Term = args.Term
+  rf.persist()
 }
 
 type AppendEntriesArgs struct {
@@ -244,8 +246,8 @@ func (rf *Raft) ApplyChangesLoop() {
   for ; !rf.Killed; {
     for ; rf.LastApplied < rf.Index; {
       ap := ApplyMsg { Index:rf.LastApplied + 1, Command:rf.Logs[rf.LastApplied] }
-      rf.Dlog("Commit %d, Index %d %d, Logs %d\n", rf.Logs[rf.LastApplied],
-          rf.LastApplied + 1, rf.Index, len(rf.Logs))
+      rf.Dlog("Commit %d, Index %d %d, Logs %s\n", rf.Logs[rf.LastApplied],
+          rf.LastApplied + 1, rf.Index, dumpLogs(rf.Logs))
       rf.persist()
       rf.LastApplied ++
       rf.applyCh <- ap
@@ -266,16 +268,20 @@ func (rf *Raft) AppendEntries(args AppendEntriesArgs, reply *AppendEntriesReply)
   }
 
   timeout := rf.ResetTimeout()
-  rf.Dlog("from %d, n-timeout %v, n-term %d, Index %d %d\n", args.ClientId,
-      timeout, args.Term, rf.Index, args.Index)
+  rf.Dlog("from %d, n-timeout %v, n-term %d, Logs %d %d %s\n", args.ClientId,
+      timeout, args.Term, rf.LastApplied, rf.Index, dumpLogs(rf.Logs))
   if len(args.Logs) > rf.Index {
     copyLogs(&rf.Logs, args.Logs, rf.Index, len(args.Logs))
+    rf.Dlog("A.update %d -> %d, %s\n", rf.Index, len(args.Logs), dumpLogs(args.Logs))
+    rf.persist()
   }
   if args.Index > rf.Index {
     rf.Index = args.Index
+    rf.persist()
   }
   rf.Term = args.Term
   rf.LeaderId = args.ClientId
+  rf.persist()
   reply.Ok = true
 }
 
@@ -305,19 +311,25 @@ func (rf *Raft) asCandidate() int {
   // as candidate
   rf.Dlog("candidate mode, update term to %d\n", rf.Term + 1)
   rf.incTerm()
-  req := RequestVoteArgs { Term: rf.Term, ClientId: rf.me }
-  reply := &RequestVoteReply{}
   count := 1
   for i := 0; i < len(rf.peers); i ++ {
     if rf.Killed { return 0; }
     if i == rf.me { continue }
+
+    req := RequestVoteArgs { Term: rf.Term, ClientId: rf.me }
+    reply := &RequestVoteReply{}
+
     rf.Dlog("wait.RequestVote(%d)\n", i)
     ok := rf.RPC(i, "Raft.RequestVote", req, reply);
+    rf.Dlog("reply is %v\n", *reply)
     if ok && reply.VoteYou {
+      rf.Dlog("wait.RequestVote(%d) -> vote me\n", i)
       count ++
       if reply.Index > rf.Index {
         copyLogs(&rf.Logs, reply.Logs, rf.Index, reply.Index)
+        rf.Dlog("V.update %d -> %d, %s\n", rf.Index, reply.Index, dumpLogs(rf.Logs))
         rf.Index = reply.Index
+        rf.persist()
       }
     }
   }
@@ -360,6 +372,7 @@ func (rf *Raft) asLeader() {
     }
     if count > len(rf.peers) / 2 {
       rf.Index = LogsLen
+      rf.persist()
     }
 
     if rf.Killed { return; }
