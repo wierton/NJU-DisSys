@@ -326,7 +326,9 @@ func (rf *Raft) asCandidate() int {
       rf.Dlog("wait.RequestVote(%d) -> vote me\n", i)
       count ++
       if reply.Index > rf.Index {
+        rf.mu.Lock()
         copyLogs(&rf.Logs, reply.Logs, rf.Index, reply.Index)
+        rf.mu.Unlock()
         rf.Dlog("V.update %d -> %d, %s\n", rf.Index, reply.Index, dumpLogs(rf.Logs))
         rf.Index = reply.Index
         rf.persist()
@@ -455,10 +457,12 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
   if isLeader {
     rf.mu.Lock()
     rf.Logs = append(rf.Logs, command)
+    LogsLen := len(rf.Logs)
     c, _ := command.(int)
-    rf.Dlog("Start %d, index %d, %s\n", c, rf.Index, dumpLogs(rf.Logs))
+    rf.Dlog("Start %d, index %d, logs %d %s\n", c, rf.Index, LogsLen,
+        dumpLogs(rf.Logs))
     rf.mu.Unlock()
-    return len(rf.Logs), rf.Term, isLeader
+    return LogsLen, rf.Term, isLeader
   }
   return rf.Index, rf.Term, isLeader
 }
